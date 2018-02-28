@@ -44,9 +44,12 @@ namespace eval ::tweircp {
     clean 1           \
     syntax ""         \
     target ""         \
+    chan ""           \
+    nick ""           \
     empty_error 0     \
     syntax_on_empty 0 \
     unknown_error 1   \
+    before_return ""  \
     usage "--- %bind% Options ---------------" \
   ]
 
@@ -61,35 +64,44 @@ namespace eval ::ircp {
 
 # non-destructively parse passed options
 proc ::tweircp::parse { arglist parameters { opts {} } } {
-  ::tweircp::parsed arglist $parameters $opts
+  ::tweircp::parsed arglist $parameters $opts 2
 }
 
 # destructively parse passed options
-proc ::tweircp::parsed { arglist parameters { opts {} } } {
+proc ::tweircp::parsed { arglist parameters { opts {} } { level 1 } } {
   upvar 1 $arglist arguments
   set defaults [::tweircp::defaults $parameters]
   set options [::tweircp::options $opts]
+  set silent [dict get $options silent]
+  set before_return [dict get $options before_return]
   #set caller [lindex [split [info level [expr [info level] - 2]]] 0]
 
   # @todo change this, make the response more flexible without adding additional burdensome options
   if { ([_::empty $arguments] && [dict get $options syntax_on_empty]) || [_::includes $arguments "--syntax"] } {
 
-    if { ![dict get $options silent] } {
-      puthelp "PRIVMSG [dict get $options target] :[dict get $options syntax]"
+    if { [_::not $silent] } {
+      puthelp "PRIVMSG [::tweircp::determineTarget $options] :[dict get $options syntax]"
     }
 
-    return false
+    if { [_::not [_::empty $before_return]] } { uplevel $level $before_return }
 
+    return -level $level 1
   } elseif { [_::includes $arguments "--help"] } {
-      #process help (does nothing currently)
-      return [::tweircp::buildHelp $parameters]
+
+    outputHelp [::tweircp::buildHelp $parameters [dict get $options usage]] [::tweircp::determineTarget $options]
+
+    if { [_::not [_::empty $before_return]] } { uplevel $level $before_return }
+    return -level $level 1
   }
 
   if { [catch { set result [::tweircp::parser arguments $defaults $options] } err] } {
-    if { ![dict get $options silent] } {
+    if { [_::not $silent] } {
       return -code error $err
     }
-    return false
+
+    if { [_::not [_::empty $before_return]] } { uplevel $level $before_return }
+
+    return -level $level 1
   }
 
   return $result
@@ -236,8 +248,49 @@ proc ::tweircp::build { dictionary options } {
 }
 
 # @todo
-proc ::tweircp::buildHelp { } {
+proc ::tweircp::buildHelp { parameters usage } {
+  regsub -nocase %bind% $usage $::lastbind usage
 
+  set help_lists {}
+
+  if { [_::not [_::empty $usage]] } { _::push help_lists $usage }
+
+  foreach param $parameters {
+    set property [_::first [set opts [split [_::first $param] "." ]]]
+    set modifiers [_::rest $opts]
+    set help [lindex $param end]
+
+    if { [_::include $modifiers "secret"] } { continue }
+
+    if { [llength $param] != 3 } {
+      if { [_::include $modifiers "alias"] } {
+        set help "alias for $help"
+      }
+    }
+
+    set message ""
+
+    if { [string length $property] == 1 } {
+      set message "<-$property>"
+    } elseif { [_::not [_::includes $modifiers "first"]] } {
+      set message "<--$property> <$property>"
+    } else {
+      set message "<$property>"
+    }
+
+    _::push help_lists "[::tweircp::padRight $message 40]| $help"
+  }
+
+  return $help_lists
+}
+
+proc ::tweircp::padRight { str upto { char {}} } {
+  if { [_::empty $char ]} { set char " " }
+  while { [string length $str] < $upto } {
+    append str $char
+  }
+
+  return $str
 }
 
 # Process typechecking for values
@@ -538,4 +591,24 @@ proc ::tweircp::stripColor { color } {
 # @return [string]
 proc ::tweircp::stripStyle { style } {
   regsub -all -- {\\x(0F|02|1D|16|1F)} $style ""
+}
+
+proc ::tweircp::outputHelp { help target } {
+  foreach message $help {
+    puthelp "PRIVMSG $target :$message"
+  }
+}
+
+proc ::tweircp::determineTarget { options } {
+  set l [list target chan nick]
+
+  foreach item $l {
+    set target [dict get $options $item]
+
+    if {[_::not [_::empty $target]]} {
+      return $target
+    }
+  }
+
+  return ""
 }
